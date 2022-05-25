@@ -1,0 +1,386 @@
+---
+title: "Association rules and Clustering Methods"
+---
+\vspace{0.25in}
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tm)
+library(text2vec)
+library(text2vec)
+library(SnowballC)
+library(glmnet)
+library(vip)
+library(arules)
+```
+
+## Problem Overview
+
+This assignment illustrates several of the unsupervised data techniques we used in class. You’ll need to use subjective judgment and domain knowledge to evaluate the quality of the results of these data mining methods. You may find these techniques useful for exploring your project data!
+
+The data for this assignment can be found in recipes_2022.csv. This data set contains a set of recipes from the website epicurious.com and their ingredients, including user-generated tags of the general geographical area that the cuisine is from. Each row represents one recipe and contains the cuisine as well as a list of the ingredients used.
+
+The goal of this analysis is to identify clusters and ingredient groups in the data rather than to predict a given outcome variable. 
+
+The following code block reads in the recipe dataset.
+
+```{r data_setup}
+recipes <- read_csv("recipes_2022.csv")  #read the recipe dataset
+
+```
+
+## 1: Data Cleaning and Feature Engineering
+
+a. The goal of clustering and unsupervised learning in general is to see whether you can find "natural" groupings in your data that you would not otherwise discover. Sometimes it's useful to use other variables to help label your clusters. The current cuisine variable is useful but it might be too fine-grained. Create a new variable called **cuisine_continent** in your dataset that represents the continent associated with each cuisine that we might use to help understand the results of our clustering.
+
+
+
+```{r code1a}
+recipes = recipes %>%
+  mutate(cuisine_continent = case_when(cuisine %in% c("Chinese","Asian","MiddleEastern","Thai","Japanese","Indian","Vietnamese") ~ "Asia",
+                                       cuisine %in% c("American","Central_SouthAmerican") ~ "North America",
+                                       cuisine %in% c("Mexican","Southern_SoulFood","Cajun_Creole") ~ "Sounth America",
+                                       cuisine %in% c("African","Moroccan") ~ "Africa",
+                                       cuisine %in% c("English_Scottish","Italian","French",
+                                                     "EasternEuropean_Russian","Southwestern","Jewish",
+                                                     "Mediterranean","Greek","Spanish_Portuguese",
+                                                     "Irish","German","Scandinavian","Spanish_Portuguese") ~ "Europe")
+         )
+
+```
+
+b. In order to do k-means clustering on the recipes, we'll need to turn each recipe into a "bag of ingredients" representation (one row per recipe, one binary column per ingredient). Fortunately, you can follow the steps to make a DTM that we used in HW3 for text data.
+
+
+```{r code1b}
+# Set up tokenizer
+prep_fun = tolower
+cleaning_tokenizer <- function(v) {
+  v %>%
+    #removeNumbers %>% #remove all numbers
+    #removePunctuation %>% #remove all punctuation
+    #removeWords(stopwords(kind="en")) %>% #remove stopwords
+    #stemDocument %>%
+    word_tokenizer 
+}
+tok_fun = cleaning_tokenizer
+
+# Iterate over the individual documents and convert them to tokens
+# Uses the functions defined above.
+it_ingredients= itoken(recipes$ingredients, 
+                  preprocessor = prep_fun, 
+                  tokenizer = tok_fun, 
+                  ids = recipes$id, 
+                  progressbar = FALSE)
+
+# Create the vocabulary from the itoken object
+vocab = create_vocabulary(it_ingredients)
+#vocab_small = prune_vocabulary(vocab, vocab_term_max = 500)##give you 500 most frequent terms
+
+# Create a vectorizer object using the vocabulary we learned
+vectorizer = vocab_vectorizer(vocab)
+
+# Convert the training documents into a DTM and make it a binary BOW matrix
+dtm_ingredients = create_dtm(it_ingredients, vectorizer)
+dtm_ingredients_bin <- dtm_ingredients>0+0
+
+new_DF <- data.frame(as.matrix(dtm_ingredients_bin))
+
+
+
+
+```
+
+## 2: kMeans Clustering
+
+2a. The first step is to try to understand how many clusters there actually are in the data. Use the "elbow" method to plot the total within-sum-of-squares for a variety of numbers of clusters. Make sure to set 20 random starts to ensure that you have good clusters. Based on this plot, I would choose k= 4 ?
+
+```{r code 2a}
+
+#try using "elbow method" to select number of centers
+possible_centers <- c(1:20)
+numcenters <- length(possible_centers)
+withins <- rep(0, numcenters)
+
+#for every number of centers, measure the within-ss
+for (i in c(1:numcenters)){
+  centers <- possible_centers[i]
+  km.out=kmeans(new_DF,centers=centers,nstart=20)
+  within <- km.out[[5]]
+  withins[i] <- within
+}
+
+
+plot(withins)
+
+```
+
+2b. Train a k-means clustering with 4 centers (using 20 random starts as before). How many recipes are included in each cluster?
+
+**Cluster1: 1725 Cluster2:1134  Cluster3:651 Cluster4: 1490 ** 
+
+```{r code 2b}
+#run kmeans on the full set of recipes
+#start with just 4 clusters
+#nstart=20 does 20 random starts to overcome local optima issues
+km.out = kmeans(new_DF,centers=4,nstart=20)
+
+#these are the cluster centers
+centers <- as.data.frame(t(km.out[2]$centers)) %>% 
+  rename(Center1 = 1, Center2 = 2, Center3 = 3, Center4 = 4)
+
+#count how mny recipes are included in each cluster
+num_table <- table(km.out$cluster,recipes$cuisine_continent)
+num_table
+rowSums(num_table)
+```
+
+
+2c. Report the cluster mean results for five ingredients: butter, garlic, cocoa, lime_juice, and cheese. For each ingredient, how would you describe the differences among the clusters?
+
+**ANSWER TO QUESTION 2c HERE: center1 mostly contains butter and cocoa, so it might be making chocolate or some desserts. center4 mostly contains garlic and lime_juice, might be cuisine related to seafood. Center3 mostly contains garlic and butter, might be some eastern Mediterranean cuisine. Center 2 mostly contain butter, but only have 30%.** 
+
+```{r code 2c}
+centers[c("butter","garlic","cocoa","lime_juice","cheese"),]
+```
+
+2d.	For each cluster, identify five “characteristic” ingredients. That is, list the five ingredients that are most representative of each cluster. Do the ingredients you identified give you any insight into what type of recipes might be included in each cluster? Explain.
+
+**ANSWER TO QUESTION 2d HERE: Cluster1 might be bread or cake, so it maybe american food. Cluster2 is hard to identified but might be african food. Cluster4 has soy sause, so it maybe asian food. Cluster3 contains lots of olive oil, tomato and garlic so it might be european food. ** 
+
+```{r code 2d}
+# We could also look at the items with the highest values in each cluster center 
+cluster1_max <- centers %>%
+  slice_max(Center1, n=5) %>%
+  select(Center1)
+cluster1_max
+
+cluster2_max <- centers %>%
+  slice_max(Center2, n=5) %>%
+  select(Center2)
+cluster2_max
+
+cluster3_max <- centers %>%
+  slice_max(Center3, n=5) %>%
+  select(Center3)
+cluster3_max
+
+cluster4_max <- centers %>%
+  slice_max(Center4, n=5) %>%
+  select(Center4)
+cluster4_max
+```
+
+```{r code 2dd}
+#cluster2_max <- centers %>%
+#  slice_max(Center2, n=5) %>%
+#  select(Center2)
+#cluster2_max
+##reset index
+## create new df add row name as another column
+centers2 <- data.frame(names = row.names(centers), centers)
+
+clu <- c(1,2,3,4)
+
+
+for (i in (1:length(clu))){
+  
+  cluster_max <- centers2 %>%
+    select(c(1,i+1)) %>%
+    rename(this_center = 2) %>%
+    slice_max(this_center, n=5)
+    print(cluster_max)
+  
+
+  print(c(1,i+1))
+  
+}
+
+```
+
+2e.	The output allows you to identify, for each recipe, the cluster they belong to using (for example) km.out$cluster. Create a table showing how many recipes from each cluster are associated with each continent by combining the cluster assignments with the **cuisine_continent** column from the original data.
++	Does this table support your conclusions in (d)? Explain. 
++	Which pair of continents are the most similar?
++	Which cuisine is most associated with cluster 2? Which cuisine is most associated with cluster 3? Do the ingredients you listed in part (c) correctly describe these cuisines (according to your domain knowledge)? 
++	If I have a new recipe that uses cane molasses, nutmeg, cinnamon, and vanilla, which cluster would you assign it to?
+
+**ANSWER TO QUESTION 2e HERE:Except for cluster2, the conclusions for other three clusters support my conclusion from (d). Cluster 2 mostly are for North America food, but I concluded it to be African food. Cluster 3 is most associated with cluster 2. Cluster 2 is most associated with cluster 3. Yes, in Europe cuisine, they do use lots of garlic in seafood or pasta and American food use lots of butter for steak, bread and cookies. 4. I might assign the new recipe to cluster 1, which indicates to be ameircan food, because these new recipes are mostly sweet ingredients and could be mostly used on bread or desserts.** 
+
+```{r code 2e}
+table(km.out$cluster,recipes$cuisine_continent)
+
+cluster_assignments <- km.out$cluster
+recipes.clusters <- cbind(recipes, cluster_assignments) %>%
+  mutate(cluster_assignments = as.factor(cluster_assignments),
+         cuisine_continent = as.factor(cuisine_continent))
+
+```
+
+2f.	Run kmeans with K=5 and decide which set of clusters (K=5 or K=4) is more meaningful to you. Explain your rationale.
+
+**ANSWER TO QUESTION 2f HERE: Kmeans with K=5 might be more meaningful to me, because in cluster3 of K=5 model, the main ingredients is cayenne, however there is no cayenne appeared in top5 from any of the clusters in model with K=4. Therefore, this high proportion of new ingredients should be useful for prediction.** 
+
+```{r code 2f}
+km.out.5 = kmeans(new_DF,centers=5,nstart=20)
+
+#these are the cluster centers
+centers5 <- as.data.frame(t(km.out.5[2]$centers)) %>% 
+  rename(Center1 = 1, Center2 = 2, Center3 = 3, Center4 = 4, Center5 = 5)
+
+
+cluster1_max <- centers5 %>%
+  slice_max(Center1, n=5) %>%
+  select(Center1)
+cluster1_max
+
+cluster2_max <- centers5 %>%
+  slice_max(Center2, n=5) %>%
+  select(Center2)
+cluster2_max
+
+cluster3_max <- centers5 %>%
+  slice_max(Center3, n=5) %>%
+  select(Center3)
+cluster3_max
+
+cluster4_max <- centers5 %>%
+  slice_max(Center4, n=5) %>%
+  select(Center4)
+cluster4_max
+
+cluster5_max <- centers5 %>%
+  slice_max(Center5, n=5) %>%
+  select(Center4)
+cluster5_max
+```
+
+
+## 3: Hierarchical Clustering
+
+3a. The goal here will be to cluster ingredients instead of recipes. You can do this by taking the transpose of your recipe dataframe, so that each row is one ingredient and each column is one recipe. You should select only the last 40 rows of the resulting transposed dataframe to get the 40 most commonly-used ingredients (otherwise your dendrogram won't be readable). Run hierarchical clustering with method = "complete" on the ingredient dataframe, then plot the dendrogram that results.
+
+**ANSWER TO QUESTION 3a HERE:** 
+```{r code 3a}
+
+feats <- tail(t(new_DF),n = 40)
+titles <- recipes$cuisine_continent
+
+#run hierarchical clustering 
+hc.complete <- hclust(dist(feats), method="complete")
+
+#cut to yield 5 clusters
+cut.complete <- cutree(hc.complete, k = 5)
+feats <- cbind(feats, cut.complete)#add cluster assignment to the features
+dend <- as.dendrogram(hc.complete)
+
+#plot the dendrogram
+par(mar=c(6.1, 4.1, 4.1, 1.1))
+##plot(feats, main="The Office Seasons 1-2 Dendrogram", labels=titles, sub="")
+
+plot(dend)
+
+#add a visualization of the 5 clusters
+rect.hclust(hc.complete, k = 5, border = 2:6)
+abline(h = 40, col = "red")
+
+
+```
+
+b. What are the most similar pair of ingredients in the dataset, based on recipe occurence? How can you tell?
+
+
+**ANSWER TO QUESTION 3b HERE: milk_fat and milk. The distance is the lowest between milk_fat and milk.** 
+
+c. If we thought there were two clusters in the data, where would we "cut" the dendrogram? c. If we cut the dendrogram at Height = 40, how many clusters would there be? Can you describe each resulting cluster in words?
+
+
+**ANSWER TO QUESTION 3c HERE:50; 5 clusters; onion, parsley and tomato are in one cluster, they are all like decoration in cuisine. Garlic and olive oil are another cluster, these two are necessary for most of the dishes, are being use abundantly. The other cluster contains butter, wheat and egg, are used for cake and bread.The forth cluster contains most of the ingredients, meaning that they may not have that close of correlation as to cuisine. The last cluster contains black pepper, cayenne, vinegar and vegitable oil, meaning that this cluster provided seasonal for cuisine.** 
+
+d. Can you observe anything else interesting from the hierarchical clustering?
+
+
+**ANSWER TO QUESTION 3d HERE:Carrot and thyme are in one group together. Rice and chicken in together is also interesting, because there is actually a famous cuisine in Taiwan called Chiayi chicken rice, it only contains chicken and rice.** 
+
+
+
+## 4: Association Rules
+
+Use read.transactions() to read in the ingredients_only_2021.csv as a set of transactions for the purposes of learning association rules.
+
+```{r code associations}
+tr <- read.transactions("ingredients_only_2022.csv", format = "basket", sep = " ")
+```
+
+a. Create an item frequency plot showing the top 20 ingredients across all recipes. What percent of all recipes include the most common ingredient?
+
+**ANSWER TO QUESTION 4a HERE:35%** 
+```{r code 4a}
+#plot the most frequent items
+itemFrequencyPlot(tr, topN = 20, type = "absolute")
+itemFrequencyPlot(tr, topN = 20, type = "relative")
+
+
+```
+
+b. Run the apriori algorithm with minimum support = 0.01, minimum confidence = 0.8, and maxlen = 10. How many rules does this generate?
+
+**ANSWER TO QUESTION 4b HERE:510 rules** 
+```{r code 4b}
+
+#learn some association rules
+#support and lift are the minimum thresholds for rules to be considered
+#note: decreasing these parameters will increase the number of rules
+rules_full<-apriori(tr, parameter = list(support = 0.01, confidence = 0.8))
+
+#summarize the set of rules
+summary(rules_full)
+```
+
+c. Print the top 20 rules. Can you see any interesting insights from these rules?
+
+
+**ANSWER TO QUESTION 4c HERE: Green bell pepper can lead to onion is interesting, else rules are just some really common combination for bread or cake. Cream cheese, wheat-> egg rule has a really high confidence of 90%.** 
+```{r code 4c}
+#list the first 20 rules
+inspect(rules_full[1:20])
+
+```
+
+d. Now, sort the rules in decreasing order of confidence and again print the top 20. For the best rule according to lift:
++ How many recipes follow this rule?
++ What exactly is this rule (in words)?
++ Describe the properties of this rule (support, confidence, and lift) in terms of the problem/data.
++ Do you consider this a useful rule? Support your answer.
++ How would you describe these top 20 confidence rules overall? That is, what kind of recipes are these rules describing?
+
+
+**ANSWER TO QUESTION 4d HERE: 90 recipes follow the rule "{fenugreek, pepper} => {turmeric}". When fenugreek and pepper appears, turmeric also appears in the recipe. Support is 0.18,relatively low with high confidence of 1 and high lift around 30, this rule might be considered to be not so useful, due to that low support indicated that this rule may just be noise and not a true pattern. Most of these rules are describing bread, cake or cookies, inferring to be American or European recipes. The other major rules are common combination can be seen in all kind of cuisines, that is seasonal ingredients like pepper, turmeric and coriander, could be more like European or Asian recipes.** 
+```{r code 4d}
+library(arulesViz)
+
+#plot support vs. lift to get an understanding of the ranges
+#can help with re-running the rules
+plot(rules_full, measure = c("support", "lift"), shading = "confidence", jitter = 0)
+inspect(head(rules_full, n = 20, by = "confidence"))
+
+#subset the top 20 rules by confidence
+top20rules <- head(rules_full, n = 20, by = "confidence")
+top20rules
+#apply to very few transaction in the set, lift indicates surprisingness, how much more often
+```
+
+
+e. Create a graph-based plot of the top 20 confidence rules. Describe what insights you could get from this plot.
+
+**ANSWER TO QUESTION 4e HERE: The relationship of co-occurence between coriander, fenugreek, tumeric and onion are having not so high probabilities, but appear to be having relatively high lift, meaning that they can be occur really more often than random selecting. Therefore, these rules are somehow useful but not that useful when compared to the second following group of rules. The second group of rules is the relationship between milk, cream, butter, wheat and egg. These rules have a relatively high support but lower lift than the first group of rules, indicating that these ingredients may have higher chance to appear together, but the probabilities of them showing up together are not that much higher than random selecting. ** 
+```{r code 4e}
+#subset the top 20 rules by confidence, and plot them in (network) graph form
+top20rules <- head(rules_full, n = 20, by = "confidence")
+
+#Format is: lhs -> rule (vertex) -> rhs"
+#by default, uses iGraph (use iGraph commands to change color, shading, etc.)
+plot(top20rules, method = "graph")
+
+```
